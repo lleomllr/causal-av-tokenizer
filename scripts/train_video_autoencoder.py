@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from avtokenizer import AVWindowConfig, SynchronizedAVDataset
-from avtokenizer.video_autoencoder import VideoAutoencoder, psnr_from_l1
+from avtokenizer.video_autoencoder import VideoAutoencoder, edge_loss, psnr_from_l1
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,12 +37,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--image-size", type=int, default=128)
     parser.add_argument("--latent-channels", type=int, default=128)
+    parser.add_argument("--bottleneck", type=str, default="ae", choices=["ae", "vae", "fsq"])
+    parser.add_argument("--fsq-levels", type=str, default="8,8,8,8,8,8")
+    parser.add_argument("--edge-loss-weight", type=float, default=0.1)
+    parser.add_argument("--kl-weight", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-train-batches", type=int, default=0)
+    parser.add_argument("--max-val-batches", type=int, default=0)
     return parser.parse_args()
 
 
@@ -60,35 +65,71 @@ def flatten_video_batch(batch: dict[str, object], device: torch.device) -> torch
     return video.reshape(batch_size * num_frames, channels, height, width)
 
 
+def parse_fsq_levels(levels: str) -> tuple[int, ...]:
+    parsed = tuple(int(part.strip()) for part in levels.split(",") if part.strip())
+    if not parsed:
+        raise ValueError("--fsq-levels must contain at least one integer")
+    return parsed
+
+
+def compute_losses(
+    *,
+    model: VideoAutoencoder,
+    frames: torch.Tensor,
+    edge_weight: float,
+    kl_weight: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    recon, aux = model(frames, return_aux=True)
+    l1 = F.l1_loss(recon, frames)
+    edges = edge_loss(recon, frames)
+    kl = aux["kl_loss"]
+    total = l1 + edge_weight * edges + kl_weight * kl
+    metrics = {
+        "loss": float(total.detach().cpu()),
+        "l1": float(l1.detach().cpu()),
+        "edge": float(edges.detach().cpu()),
+        "kl": float(kl.detach().cpu()),
+        "psnr": float(psnr_from_l1(l1.detach()).cpu()),
+    }
+    return total, metrics
+
+
 def run_epoch(
     *,
     model: VideoAutoencoder,
     loader: DataLoader,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
+    edge_weight: float,
+    kl_weight: float,
     max_batches: int = 0,
-) -> tuple[float, float]:
+) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
-    losses: list[float] = []
-    psnrs: list[float] = []
+    metric_sums = {"loss": 0.0, "l1": 0.0, "edge": 0.0, "kl": 0.0, "psnr": 0.0}
+    count = 0
 
     for step, batch in enumerate(loader, start=1):
         frames = flatten_video_batch(batch, device)
         with torch.set_grad_enabled(is_train):
-            recon = model(frames)
-            loss = F.l1_loss(recon, frames)
+            loss, metrics = compute_losses(
+                model=model,
+                frames=frames,
+                edge_weight=edge_weight,
+                kl_weight=kl_weight,
+            )
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
-        losses.append(float(loss.detach().cpu()))
-        psnrs.append(float(psnr_from_l1(loss.detach()).cpu()))
+        for key in metric_sums:
+            metric_sums[key] += metrics[key]
+        count += 1
         if max_batches and step >= max_batches:
             break
 
-    return sum(losses) / len(losses), sum(psnrs) / len(psnrs)
+    return {key: value / count for key, value in metric_sums.items()}
 
 
 @torch.no_grad()
@@ -159,39 +200,55 @@ def main() -> None:
         pin_memory=torch.cuda.is_available(),
     )
 
-    model = VideoAutoencoder(latent_channels=args.latent_channels).to(device)
+    fsq_levels = parse_fsq_levels(args.fsq_levels)
+    model = VideoAutoencoder(
+        latent_channels=args.latent_channels,
+        bottleneck=args.bottleneck,
+        fsq_levels=fsq_levels,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     print(f"device: {device}")
+    print(f"bottleneck: {args.bottleneck}")
     print(f"train windows: {len(train_dataset)} | val windows: {len(val_dataset)}")
 
     best_val = float("inf")
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_psnr = run_epoch(
+        train_metrics = run_epoch(
             model=model,
             loader=train_loader,
             device=device,
             optimizer=optimizer,
+            edge_weight=args.edge_loss_weight,
+            kl_weight=args.kl_weight,
             max_batches=args.max_train_batches,
         )
-        val_loss, val_psnr = run_epoch(
+        val_metrics = run_epoch(
             model=model,
             loader=val_loader,
             device=device,
             optimizer=None,
+            edge_weight=args.edge_loss_weight,
+            kl_weight=args.kl_weight,
+            max_batches=args.max_val_batches,
         )
         print(
             f"epoch {epoch:03d} | "
-            f"train L1 {train_loss:.4f} PSNR {train_psnr:.2f} | "
-            f"val L1 {val_loss:.4f} PSNR {val_psnr:.2f}"
+            f"train loss {train_metrics['loss']:.4f} L1 {train_metrics['l1']:.4f} "
+            f"edge {train_metrics['edge']:.4f} KL {train_metrics['kl']:.4f} "
+            f"PSNR {train_metrics['psnr']:.2f} | "
+            f"val loss {val_metrics['loss']:.4f} L1 {val_metrics['l1']:.4f} "
+            f"edge {val_metrics['edge']:.4f} KL {val_metrics['kl']:.4f} "
+            f"PSNR {val_metrics['psnr']:.2f}"
         )
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_metrics["loss"] < best_val:
+            best_val = val_metrics["loss"]
             checkpoint = {
                 "model": model.state_dict(),
                 "config": vars(args),
-                "best_val_l1": best_val,
+                "best_val_loss": best_val,
+                "best_val_l1": val_metrics["l1"],
             }
             torch.save(checkpoint, output_dir / "best.pt")
             save_reconstruction_grid(

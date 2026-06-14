@@ -18,6 +18,8 @@ DEFAULT_CONDITIONS = (
     "normal",
     "audio_zeroed",
     "video_zeroed",
+    "audio_masked",
+    "video_masked",
     "audio_shuffled",
     "video_shuffled",
 )
@@ -102,7 +104,7 @@ def build_model_from_checkpoint(
             "8,8,8,8,8,8,8,8",
         ),
     ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(checkpoint["model"], strict=False)
     model.eval()
     return model, config
 
@@ -127,17 +129,21 @@ def apply_condition(
     audio_mel: torch.Tensor,
     condition: str,
     generator: torch.Generator,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, bool]]:
     if condition == "normal":
-        return video, audio_mel
+        return video, audio_mel, {}
     if condition == "audio_zeroed":
-        return video, torch.zeros_like(audio_mel)
+        return video, torch.zeros_like(audio_mel), {}
     if condition == "video_zeroed":
-        return torch.zeros_like(video), audio_mel
+        return torch.zeros_like(video), audio_mel, {}
+    if condition == "audio_masked":
+        return video, audio_mel, {"missing_audio": True}
+    if condition == "video_masked":
+        return video, audio_mel, {"missing_video": True}
     if condition == "audio_shuffled":
-        return video, audio_mel[batch_permutation(audio_mel.shape[0], audio_mel.device, generator)]
+        return video, audio_mel[batch_permutation(audio_mel.shape[0], audio_mel.device, generator)], {}
     if condition == "video_shuffled":
-        return video[batch_permutation(video.shape[0], video.device, generator)], audio_mel
+        return video[batch_permutation(video.shape[0], video.device, generator)], audio_mel, {}
     raise ValueError(f"Unknown ablation condition: {condition}")
 
 
@@ -198,13 +204,13 @@ def evaluate_condition(
     for step, batch in enumerate(loader, start=1):
         video = batch["video"].to(device)
         audio_mel = batch["audio_mel"].to(device)
-        conditioned_video, conditioned_audio = apply_condition(
+        conditioned_video, conditioned_audio, model_kwargs = apply_condition(
             video=video,
             audio_mel=audio_mel,
             condition=condition,
             generator=generator,
         )
-        recon = model(conditioned_video, conditioned_audio)
+        recon = model(conditioned_video, conditioned_audio, **model_kwargs)
 
         batch_size, num_frames, channels, height, width = video.shape
         target_frames = video.reshape(batch_size * num_frames, channels, height, width)

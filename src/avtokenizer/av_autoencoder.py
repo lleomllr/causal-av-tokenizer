@@ -32,6 +32,8 @@ class AudioVisualAutoencoder(nn.Module):
         )
         video_channels = self.video_model.latent_channels
         audio_channels = self.audio_model.latent_channels
+        self.video_mask_token = nn.Parameter(torch.zeros(1, video_channels, 1, 1))
+        self.audio_mask_token = nn.Parameter(torch.zeros(1, audio_channels, 1, 1))
 
         self.audio_to_video = nn.Sequential(
             nn.Conv2d(audio_channels, video_channels, kernel_size=1),
@@ -61,14 +63,42 @@ class AudioVisualAutoencoder(nn.Module):
         video: torch.Tensor,
         audio_mel: torch.Tensor,
         *,
+        missing_video: bool = False,
+        missing_audio: bool = False,
         return_aux: bool = False,
     ) -> dict[str, torch.Tensor]:
         batch_size, num_frames, channels, height, width = video.shape
         frames = video.reshape(batch_size * num_frames, channels, height, width)
         mel = frame_aligned_mel_to_image(audio_mel)
 
-        video_latents, video_aux = self.video_model.encode(frames)
-        audio_latents, audio_aux = self.audio_model.encode(mel)
+        video_aux: dict[str, torch.Tensor] = {}
+        audio_aux: dict[str, torch.Tensor] = {}
+
+        if missing_video:
+            video_latent_h = downsampled_size(height, levels=4)
+            video_latent_w = downsampled_size(width, levels=4)
+            video_latents = self.video_mask_token.expand(
+                batch_size * num_frames,
+                -1,
+                video_latent_h,
+                video_latent_w,
+            )
+        else:
+            video_latents, video_aux = self.video_model.encode(frames)
+            _, _, video_latent_h, video_latent_w = video_latents.shape
+
+        if missing_audio:
+            audio_latent_h = downsampled_size(mel.shape[-2], levels=3)
+            audio_latent_w = downsampled_size(mel.shape[-1], levels=3)
+            audio_latents = self.audio_mask_token.expand(
+                batch_size,
+                -1,
+                audio_latent_h,
+                audio_latent_w,
+            )
+        else:
+            audio_latents, audio_aux = self.audio_model.encode(mel)
+
         _, video_latent_channels, video_latent_h, video_latent_w = video_latents.shape
 
         video_latents_bt = video_latents.reshape(
@@ -146,3 +176,9 @@ def zero_last_conv(module: nn.Sequential) -> None:
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
             return
+
+
+def downsampled_size(size: int, *, levels: int) -> int:
+    for _ in range(levels):
+        size = size // 2
+    return size

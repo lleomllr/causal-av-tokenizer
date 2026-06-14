@@ -175,11 +175,11 @@ def compute_losses(
     audio_from_video_l1 = video_l1.new_tensor(0.0)
     cross_loss = video_l1.new_tensor(0.0)
     if cross_loss_weight > 0.0:
-        video_from_audio = model(torch.zeros_like(video), audio_mel)
+        video_from_audio = model(video, audio_mel, missing_video=True)
         video_from_audio_frames = video_from_audio["video"].reshape(batch_size * num_frames, channels, height, width)
         video_from_audio_l1 = F.l1_loss(video_from_audio_frames, video_frames)
 
-        audio_from_video = model(video, torch.zeros_like(audio_mel))
+        audio_from_video = model(video, audio_mel, missing_audio=True)
         audio_from_video_l1 = F.l1_loss(audio_from_video["audio_mel"], audio_mel)
         cross_loss = video_from_audio_l1 + audio_loss_weight * audio_from_video_l1
 
@@ -298,7 +298,7 @@ def save_joint_preview(
     if not save_cross_previews:
         return
 
-    video_from_audio = model(torch.zeros_like(video), audio_mel)
+    video_from_audio = model(video, audio_mel, missing_video=True)
     cross_recon_frames = video_from_audio["video"][0, :max_frames].clamp(0.0, 1.0)
     cross_frame_error = (frames - cross_recon_frames).abs().mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
     save_image_rows(
@@ -310,7 +310,7 @@ def save_joint_preview(
         output=output_dir / "video_from_audio.png",
     )
 
-    audio_from_video = model(video, torch.zeros_like(audio_mel))
+    audio_from_video = model(video, audio_mel, missing_audio=True)
     cross_recon_mel = frame_aligned_mel_to_image(audio_from_video["audio_mel"][:4]).clamp_min(0.0)
     cross_mel_error = (mel - cross_recon_mel).abs()
     save_mel_rows(

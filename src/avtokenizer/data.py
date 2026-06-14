@@ -29,6 +29,7 @@ class AVWindowConfig:
     audio_steps_per_frame: int = 4
     mel_win_length: int = 400
     mel_hop_length: int = 160 
+    include_video: bool = True
     include_audio: bool = True
     include_waveform: bool = False 
     extensions: tuple[str, ...] = VIDEO_EXT
@@ -188,9 +189,12 @@ class SynchronizedAVDataset(Dataset):
     
     def __getitem__(self, index: int) -> dict[str, object]:
         window = self.windows[index]
-        video, waveform, native_audio_rate, native_video_fps = _read_av_window(window, self.config)
-        
-        video = _prepare_video(video, self.config)
+        if self.config.include_video:
+            video, waveform, native_audio_rate, native_video_fps = _read_av_window(window, self.config)
+            video = _prepare_video(video, self.config)
+        else:
+            waveform, native_audio_rate = _read_audio_window(window, self.config)
+            native_video_fps = 0.0
         
         frame_times = torch.linspace(
             window.start_sec, 
@@ -200,7 +204,6 @@ class SynchronizedAVDataset(Dataset):
         )[:-1]
         
         sample: dict[str, object] = {
-            "video": video,
             "frame_times": frame_times,
             "path": str(window.path),
             "start_sec": window.start_sec,
@@ -208,6 +211,8 @@ class SynchronizedAVDataset(Dataset):
             "native_video_fps": native_video_fps,
             "native_audio_rate": native_audio_rate,
         }
+        if self.config.include_video:
+            sample["video"] = video
         if self.config.include_audio:
             waveform = _prepare_waveform(waveform, native_audio_rate, self.config)
             sample["audio_mel"] = _waveform_to_frame_aligned_mel(waveform, self.config)
@@ -321,6 +326,45 @@ def _read_av_window_with_ffmpeg(window: AVWindow, config: AVWindowConfig):
         audio = torch.zeros(1, samples, dtype=torch.float32)
 
     return video, audio, config.sample_rate, native_video_fps
+
+
+def _read_audio_window(window: AVWindow, config: AVWindowConfig):
+    try:
+        import imageio_ffmpeg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Install the FFmpeg fallback with: pip install imageio-ffmpeg") from exc
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    duration = max(0.001, window.end_sec - window.start_sec)
+    audio_cmd = [
+        ffmpeg,
+        "-v",
+        "error",
+        "-ss",
+        f"{window.start_sec:.6f}",
+        "-t",
+        f"{duration:.6f}",
+        "-i",
+        str(window.path),
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(config.sample_rate),
+        "pipe:1",
+    ]
+    try:
+        audio_bytes = subprocess.check_output(audio_cmd, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        audio_bytes = b""
+
+    if audio_bytes:
+        audio = torch.frombuffer(bytearray(audio_bytes), dtype=torch.float32).unsqueeze(0)
+    else:
+        samples = max(1, round(duration * config.sample_rate))
+        audio = torch.zeros(1, samples, dtype=torch.float32)
+    return audio, config.sample_rate
 
 
 def _prepare_video(video, config: AVWindowConfig):

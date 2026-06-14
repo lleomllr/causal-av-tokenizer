@@ -1,0 +1,21 @@
+[project]
+name = "causal-av-tokenizer"
+version = "0.1.0"
+description = "Synchronized causal audio-video dataloader for lightweight world-modeling codec experiments."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "torchvision>=0.17",
+  "torchaudio>=2.2",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+

@@ -1,5 +1,6 @@
 [project]
 name = "causal-av-tokenizer"
+author = "Léo Meillier"
 version = "0.1.0"
 description = "Synchronized causal audio-video dataloader for lightweight world-modeling codec experiments."
 requires-python = ">=3.10"

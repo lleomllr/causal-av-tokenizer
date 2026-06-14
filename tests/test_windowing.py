@@ -40,4 +40,23 @@ def test_build_window_index_from_manifest(tmp_path):
     assert windows[0].path == video
     assert windows[-1].start_sec == 2.0
     
+
+def test_build_window_index_from_window_manifest(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.touch()
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text(
+        "path,start_sec,end_sec,duration_sec,split\n"
+        "clip.mp4,1.5,3.5,10.0,train\n"
+        "clip.mp4,4.0,6.0,10.0,val\n",
+        encoding="utf-8",
+    )
+
+    windows = build_window_index(manifest=manifest, split="train")
+
+    assert len(windows) == 1
+    assert windows[0].path == video
+    assert windows[0].start_sec == 1.5
+    assert windows[0].end_sec == 3.5
+
     

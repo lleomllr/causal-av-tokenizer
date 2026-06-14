@@ -29,6 +29,7 @@ class AVWindowConfig:
     audio_steps_per_frame: int = 4
     mel_win_length: int = 400
     mel_hop_length: int = 160 
+    include_audio: bool = True
     include_waveform: bool = False 
     extensions: tuple[str, ...] = VIDEO_EXT
     
@@ -177,8 +178,6 @@ class SynchronizedAVDataset(Dataset):
         video, waveform, native_audio_rate, native_video_fps = _read_av_window(window, self.config)
         
         video = _prepare_video(video, self.config)
-        waveform = _prepare_waveform(waveform, native_audio_rate, self.config)
-        audio_mel = _waveform_to_frame_aligned_mel(waveform, self.config)
         
         frame_times = torch.linspace(
             window.start_sec, 
@@ -189,7 +188,6 @@ class SynchronizedAVDataset(Dataset):
         
         sample: dict[str, object] = {
             "video": video,
-            "audio_mel": audio_mel,
             "frame_times": frame_times,
             "path": str(window.path),
             "start_sec": window.start_sec,
@@ -197,8 +195,11 @@ class SynchronizedAVDataset(Dataset):
             "native_video_fps": native_video_fps,
             "native_audio_rate": native_audio_rate,
         }
-        if self.config.include_waveform:
-            sample["audio_waveform"] = waveform
+        if self.config.include_audio:
+            waveform = _prepare_waveform(waveform, native_audio_rate, self.config)
+            sample["audio_mel"] = _waveform_to_frame_aligned_mel(waveform, self.config)
+            if self.config.include_waveform:
+                sample["audio_waveform"] = waveform
         return sample
     
     

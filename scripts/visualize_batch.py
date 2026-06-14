@@ -12,6 +12,9 @@ try:
 except PermissionError:
     mpl_config_dir = Path(tempfile.gettempdir()) / "causal_av_tokenizer_matplotlib"
     mpl_config_dir.mkdir(parents=True, exist_ok=True)
+if not os.access(mpl_config_dir, os.W_OK):
+    mpl_config_dir = Path(tempfile.gettempdir()) / "causal_av_tokenizer_matplotlib"
+    mpl_config_dir.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
 
 import matplotlib

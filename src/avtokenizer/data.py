@@ -1,6 +1,7 @@
 from __future__ import annotations
 import csv 
 import math 
+import subprocess
 from dataclasses import dataclass 
 from pathlib import Path 
 from typing import Iterable, Sequence 
@@ -15,6 +16,7 @@ except ModuleNotFoundError:
     Dataset = object 
     
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+
 
 @dataclass(frozen=True)
 class AVWindowConfig:
@@ -37,6 +39,7 @@ class AVWindowConfig:
     @property
     def num_audio_samples(self) -> int: 
         return max(1, round(self.clip_seconds * self.sample_rate))
+    
     
 @dataclass(frozen=True)
 class AVWindow: 
@@ -116,10 +119,17 @@ def build_window_index(
                 rows.append((path, duration, row_split))
     if root is not None: 
         rows.extend((path, None, None) for path in list_video_files(root, config.extensions))
-        
-    if not rows: 
-        raise ValueError("No videos found. Provide --rot, --manifest, or both")
-    
+         
+    if not rows:
+        hints = ["No videos found."]
+        if root is not None:
+            hints.append(f"Scanned root: {Path(root).resolve()}")
+        if manifest is not None:
+            hints.append(f"Manifest: {Path(manifest).resolve()}")
+        hints.append(f"Expected extensions: {', '.join(config.extensions)}")
+        hints.append("Provide --root with video files, or --manifest with a path column.")
+        raise ValueError(" ".join(hints))
+      
     windows: list[AVWindow] = []
     for path, duration, row_split in rows: 
         for start in window_starts(
@@ -137,6 +147,7 @@ def build_window_index(
                 )
             )
     return windows
+
 
 class SynchronizedAVDataset(Dataset):
     def __init__(
@@ -163,7 +174,7 @@ class SynchronizedAVDataset(Dataset):
     
     def __getitem__(self, index: int) -> dict[str, object]:
         window = self.windows[index]
-        video, waveform, native_audio_rate, native_video_fps = _read_av_window(window)
+        video, waveform, native_audio_rate, native_video_fps = _read_av_window(window, self.config)
         
         video = _prepare_video(video, self.config)
         waveform = _prepare_waveform(waveform, native_audio_rate, self.config)
@@ -199,12 +210,15 @@ def _require_torch() -> None:
         )
         
 
-def _read_av_window(window: AVWindow):
+def _read_av_window(window: AVWindow, config: AVWindowConfig):
     _require_torch()
     try: 
         from torchvision.io import read_video
-    except ModuleNotFoundError as exc: 
-        raise RuntimeError("torchvision is required to read audio-video files") from exc
+    except (ImportError, ModuleNotFoundError):
+        read_video = None
+
+    if read_video is None:
+        return _read_av_window_with_ffmpeg(window, config)
     
     video, audio, info = read_video(
         str(window.path), 
@@ -222,10 +236,77 @@ def _read_av_window(window: AVWindow):
     
     if audio.numel() == 0: 
         channels = 1 
-        samples = max(1, round((window.end_sec - window.start_sec) * 16_000))
+        samples = max(1, round((window.end_sec - window.start_sec) * config.sample_rate))
         audio = torch.zeros(channels, samples, dtype=torch.float32)
-        native_audio_rate = 16_000
+        native_audio_rate = config.sample_rate
     return video, audio, native_audio_rate, native_video_fps
+
+
+def _read_av_window_with_ffmpeg(window: AVWindow, config: AVWindowConfig):
+    try:
+        import imageio_ffmpeg
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "This torchvision version does not expose torchvision.io.read_video. "
+            "Install the FFmpeg fallback with: pip install imageio-ffmpeg"
+        ) from exc
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    duration = max(0.001, window.end_sec - window.start_sec)
+    reader = imageio_ffmpeg.read_frames(
+        str(window.path),
+        pix_fmt="rgb24",
+        input_params=["-ss", f"{window.start_sec:.6f}"],
+        output_params=["-t", f"{duration:.6f}"],
+    )
+    try:
+        metadata = next(reader)
+        width, height = metadata["size"]
+        native_video_fps = float(metadata.get("fps") or 0.0)
+        frames = list(reader)
+    finally:
+        reader.close()
+
+    frame_size = width * height * 3
+    if frame_size <= 0 or not frames:
+        raise RuntimeError(f"No video frames decoded from {window.path}")
+
+    video_bytes = b"".join(frames)
+    num_frames = len(video_bytes) // frame_size
+    video = torch.frombuffer(bytearray(video_bytes), dtype=torch.uint8)
+    video = video[: num_frames * frame_size].reshape(num_frames, height, width, 3)
+    video = video.permute(0, 3, 1, 2).contiguous()
+
+    audio_cmd = [
+        ffmpeg,
+        "-v",
+        "error",
+        "-ss",
+        f"{window.start_sec:.6f}",
+        "-t",
+        f"{duration:.6f}",
+        "-i",
+        str(window.path),
+        "-f",
+        "f32le",
+        "-ac",
+        "1",
+        "-ar",
+        str(config.sample_rate),
+        "pipe:1",
+    ]
+    try:
+        audio_bytes = subprocess.check_output(audio_cmd, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        audio_bytes = b""
+
+    if audio_bytes:
+        audio = torch.frombuffer(bytearray(audio_bytes), dtype=torch.float32).unsqueeze(0)
+    else:
+        samples = max(1, round(duration * config.sample_rate))
+        audio = torch.zeros(1, samples, dtype=torch.float32)
+
+    return video, audio, config.sample_rate, native_video_fps
 
 
 def _prepare_video(video, config: AVWindowConfig):

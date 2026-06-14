@@ -1,0 +1,4 @@
+path,duration_sec,split
+raw/atari_clip.mp4,158.590,train
+raw/bond_fight_clip.mp4,43.370,train
+raw/buck_bunny_clip.mp4,196.130,val

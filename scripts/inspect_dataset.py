@@ -1,6 +1,12 @@
 from __future__ import annotations
 import argparse
+import sys
+from pathlib import Path
+import torch
 from torch.utils.data import DataLoader
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from avtokenizer import AVWindowConfig, SynchronizedAVDataset
 
 def parse_args() -> argparse.Namespace:
@@ -20,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main() -> None:
-    arg = parse_args()
+    args = parse_args()
     config = AVWindowConfig(
         clip_seconds=args.clip_seconds,
         stride_seconds=args.stride_seconds,
@@ -41,7 +47,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
     )
 
     batch = next(iter(loader))

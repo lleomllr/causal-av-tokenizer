@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import os
 import sys
@@ -20,13 +19,11 @@ if not os.access(mpl_config_dir, os.W_OK):
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-
 from avtokenizer import AVWindowConfig, SynchronizedAVDataset
 from avtokenizer.video_autoencoder import VideoAutoencoder, psnr_from_l1
 
@@ -52,11 +49,24 @@ def choose_device() -> torch.device:
     return torch.device("cpu")
 
 
+def parse_fsq_levels(levels: object) -> tuple[int, ...]:
+    if isinstance(levels, str):
+        parsed = tuple(int(part.strip()) for part in levels.split(",") if part.strip())
+        return parsed or (8, 8, 8, 8, 8, 8)
+    if isinstance(levels, (list, tuple)):
+        return tuple(int(level) for level in levels)
+    return (8, 8, 8, 8, 8, 8)
+
+
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[VideoAutoencoder, dict[str, object]]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint.get("config", {})
     latent_channels = int(config.get("latent_channels", 128))
-    model = VideoAutoencoder(latent_channels=latent_channels).to(device)
+    model = VideoAutoencoder(
+        latent_channels=latent_channels,
+        bottleneck=str(config.get("bottleneck", "ae")),
+        fsq_levels=parse_fsq_levels(config.get("fsq_levels", "8,8,8,8,8,8")),
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
     return model, config

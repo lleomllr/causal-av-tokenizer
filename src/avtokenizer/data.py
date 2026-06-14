@@ -100,7 +100,7 @@ def build_window_index(
     include_tail: bool = False,
 ) -> list[AVWindow]:
     config = config or AVWindowConfig()
-    rows: list[tuple[Path, float | None, str | None]] = []
+    rows: list[tuple[Path, float | None, str | None, float | None, float | None]] = []
     
     if manifest is not None: 
         manifest_path = Path(manifest)
@@ -117,9 +117,11 @@ def build_window_index(
                 if not path.is_absolute():
                     path = manifest_path.parent / path
                 duration = float(row["duration_sec"]) if row.get("duration_sec") else None
-                rows.append((path, duration, row_split))
+                start_sec = float(row["start_sec"]) if row.get("start_sec") else None
+                end_sec = float(row["end_sec"]) if row.get("end_sec") else None
+                rows.append((path, duration, row_split, start_sec, end_sec))
     if root is not None: 
-        rows.extend((path, None, None) for path in list_video_files(root, config.extensions))
+        rows.extend((path, None, None, None, None) for path in list_video_files(root, config.extensions))
          
     if not rows:
         hints = ["No videos found."]
@@ -132,7 +134,18 @@ def build_window_index(
         raise ValueError(" ".join(hints))
       
     windows: list[AVWindow] = []
-    for path, duration, row_split in rows: 
+    for path, duration, row_split, start_sec, end_sec in rows:
+        if start_sec is not None and end_sec is not None:
+            windows.append(
+                AVWindow(
+                    path=path,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    split=row_split,
+                )
+            )
+            continue
+
         for start in window_starts(
             duration, 
             config.clip_seconds, 

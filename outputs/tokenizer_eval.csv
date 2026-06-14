@@ -1,0 +1,4 @@
+model,bottleneck,latent_shape,discrete,val_l1,val_psnr
+video_fsq_8ch,fsq,8x8x8,true,0.1110,19.73
+video_fsq_16ch,fsq,16x8x8,true,0.0783,23.00
+video_ae_64ch,ae,64x8x8,false,0.1563,18.38
